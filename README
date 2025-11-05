@@ -1,0 +1,67 @@
+patchouli
+=========
+Patchouli is a standalone Python script that help bridges Bangumi
+(https://bgm.tv/) and Calibre (https://calibre-ebook.com/).
+The script itself is used for grouping multiple manga file as a serie,
+filling necessary metadata and adding them to Calibre library in batch.
+
+
+Requirement
+===========
+* Python 3+ (Only tested with Python 3.13.7 under GNU/Linux).
+* Calibre 8+ (Only tested with Calibre 8.7)
+
+
+Recommended Workflow
+====================
+First step is to correct the filesystem, with each directory as a serie,
+each manga as a file inside it.
+
+For example:
+
+    演员夜凪景 act-age - マツキタツヤ×宇佐崎しろ [Vol.01-Vol.12 + 108-123 话]/
+        * 演员夜凪景 act-age - Vol.01.zip
+        * 演员夜凪景 act-age - Vol.02.zip
+        * 演员夜凪景 act-age - Vol.03.zip
+        * 演员夜凪景 act-age - Vol.04.zip
+        * 演员夜凪景 act-age - Vol.05.zip
+        * 演员夜凪景 act-age - Vol.06.zip
+        * 演员夜凪景 act-age - Vol.07.zip
+        * 演员夜凪景 act-age - Vol.08.zip
+        * 演员夜凪景 act-age - Vol.09.zip
+        * 演员夜凪景 act-age - Vol.10.zip
+        * 演员夜凪景 act-age - Vol.11.zip
+        * 演员夜凪景 act-age - Vol.12.zip
+        * 演员夜凪景 act-age - Chap.108-Chap.123.zip
+
+    只有我不存在的城市-三部敬/
+        * 只有我不存在的城市 - 卷01.epub
+        * 只有我不存在的城市 - 卷02.epub
+        * 只有我不存在的城市 - 卷03.epub
+        * 只有我不存在的城市 - 卷04.epub
+        * 只有我不存在的城市 - 卷05.epub
+        * 只有我不存在的城市 - 卷06.epub
+        * 只有我不存在的城市 - 卷07.epub
+        * 只有我不存在的城市 - 卷08.epub
+        * 只有我不存在的城市 - 卷09.epub
+
+As example shown above, all the mangas should be grouped into same directory as
+a serie. The directory name will be used when searching the manga metadata, so
+it is recommended to use title that can be shown as first result in bangumi.
+Additional comment should be placed inside bracket, patchouli will exclude them
+in search text.
+
+Each manga have their own volume metadata, patchouli will also help find that
+information. User should attach volume number as filename suffix. Following
+forms are supported:
+
+    * ... - 卷01...
+    * ... - 卷 01...
+    * ... - Vol.01...
+    * ... - Vol01...
+    * ... - Vol 01...
+    * ... - 01...
+
+All the volume information must follows the half-width dash ("-") character.
+Only on above cases, patchouli will know that this book is the first release of
+the serie, and thus know where to find its metadata.
