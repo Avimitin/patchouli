@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+
+import re
+import shutil
+import requests
+from typing import NoReturn, TypedDict, cast
+
+
+VERSION = "v0.1.0"
+APP_NAME = "Avimitin/patchouli"
+GITHUB = "https://github.com/Avimitin/patchouli"
+UA = f"{APP_NAME}/{VERSION} ({GITHUB})"
+
+API_URL = "https://api.bangumi.com"
+
+
+def bail(s: str, code: int = 1) -> NoReturn:
+    """
+    Print error message and exit with custom exit code.
+
+    Args:
+        s: The message to report.
+        code: The exit code, default exit with 1.
+    """
+    print(f"ERROR: {s}")
+    exit(code)
+
+
+def cli_check(exec: str) -> str:
+    """
+    Check CLI existence and bail out when not found. Return full path to the CLI.
+
+    Args:
+        exec: CLI name to search in system.
+    """
+    path = shutil.which(exec)
+    if path is None:
+        bail(f"{exec} not found in system")
+    return path
+
+
+def guess_vol(filename: str) -> int | None:
+    """
+    Match volume filename with following pattern:
+        * name - 卷01...
+        * name - 卷 01...
+        * name - Vol.01...
+        * name - Vol01...
+        * name - Vol 01...
+
+    Args:
+        filename: The name of the manga file, don't pass full path.
+    """
+    capture = re.search(r"-\s+卷\s*(\d+)", filename)
+    if capture is not None:
+        return int(capture.group(1))
+
+    capture = re.search(r"-\s+Vol\.(\d+)", filename)
+    if capture is not None:
+        return int(capture.group(1))
+
+    capture = re.search(r"-\s+Vol\s*(\d+)", filename)
+    if capture is not None:
+        return int(capture.group(1))
+
+
+class CalibreAddConfig(TypedDict):
+    prefer_cn_name: bool
+    prefer_meta_tags: bool
+    meta_tag_least_count: int
+    auto_reject_non_manga: bool
+
+
+class BgmSubjectTag(TypedDict):
+    name: str
+    count: str
+
+
+class BgmSubjectInfobox(TypedDict):
+    key: str
+    value: str
+
+
+class BgmSubjectResp(TypedDict):
+    id: int
+    series: bool
+    platform: str
+    date: str
+    name: str
+    name_cn: str
+    tags: list[BgmSubjectTag]
+    meta_tags: list[str]
+    infobox: list[BgmSubjectInfobox]
+
+
+def get_bangumi_subject(subject_id: int) -> BgmSubjectResp:
+    """
+    Fetches subject details from the Bangumi API.
+
+    Args:
+        subject_id: The integer ID of the subject to fetch.
+    """
+    endpoint = f"/v0/subjects/{subject_id}"
+    url = API_URL + endpoint
+    headers = {"User-Agent": UA}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+
+        return cast(BgmSubjectResp, response.json())
+    except requests.exceptions.HTTPError as http_err:
+        bail(f"HTTP error occurred: {http_err}")
+    except requests.exceptions.ConnectionError as conn_err:
+        bail(f"Error connecting: {conn_err}")
+    except requests.exceptions.Timeout as timeout_err:
+        bail(f"Request timed out: {timeout_err}")
+    except requests.exceptions.RequestException as req_err:
+        bail(f"An unexpected error occurred: {req_err}")
+    except ValueError:
+        bail(f"Could not decode JSON response. Send issue at {GITHUB}")
+
+
+class BgmSearchResp(TypedDict):
+    data: list[BgmSubjectResp]
+
+
+def search_bangumi_subjects(search_payload: dict) -> BgmSearchResp:
+    """
+    Sends a search request to the Bangumi API with a JSON payload.
+
+    Args:
+        search_payload: A dictionary containing the search criteria.
+        user_agent: The custom User-Agent string to send with the request.
+    """
+    endpoint = "/v0/search/subjects"
+    url = API_URL + endpoint
+    headers = {"User-Agent": UA, "Content-Type": "application/json"}
+
+    try:
+        response = requests.post(url, headers=headers, json=search_payload, timeout=20)
+        response.raise_for_status()
+
+        # Parse the response as JSON
+        return cast(BgmSearchResp, response.json())
+    except requests.exceptions.HTTPError as http_err:
+        bail(f"HTTP error occurred: {http_err}")
+    except requests.exceptions.ConnectionError as conn_err:
+        bail(f"Error connecting: {conn_err}")
+    except requests.exceptions.Timeout as timeout_err:
+        bail(f"Request timed out: {timeout_err}")
+    except requests.exceptions.RequestException as req_err:
+        bail(f"An unexpected error occurred: {req_err}")
+    except ValueError:
+        bail(f"Could not decode JSON response from server. Send issue at {GITHUB}")
+
+
+class BgmRelationResp:
+    name: str
+    relation: str
+    type: int
+    id: int
+
+
+def get_bangumi_subject_relation(subject_id: int) -> list[BgmRelationResp]:
+    """
+    Fetches subject relation from the Bangumi API.
+
+    Args:
+        subject_id: The integer ID of the subject to fetch.
+    """
+    endpoint = f"/v0/subjects/{subject_id}/subjects"
+    url = API_URL + endpoint
+    headers = {"User-Agent": UA}
+
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+
+        return cast(list[BgmRelationResp], response.json())
+    except requests.exceptions.HTTPError as http_err:
+        bail(f"HTTP error occurred: {http_err}")
+    except requests.exceptions.ConnectionError as conn_err:
+        bail(f"Error connecting: {conn_err}")
+    except requests.exceptions.Timeout as timeout_err:
+        bail(f"Request timed out: {timeout_err}")
+    except requests.exceptions.RequestException as req_err:
+        bail(f"An unexpected error occurred: {req_err}")
+    except ValueError:
+        bail(f"Could not decode JSON response. Send issue at {GITHUB}")
+
+
+if __name__ == "__main__":
+    pass
