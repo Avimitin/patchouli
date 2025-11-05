@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 
+from pathlib import Path
 import re
 import shutil
 import requests
-from typing import NoReturn, TypedDict, cast
+import argparse
+from typing import NoReturn, TypedDict, cast, NotRequired
 
 
 VERSION = "v0.1.0"
-APP_NAME = "Avimitin/patchouli"
+APP_NAME = "patchouli"
+DEVELOPER = "Avimitin"
 GITHUB = "https://github.com/Avimitin/patchouli"
-UA = f"{APP_NAME}/{VERSION} ({GITHUB})"
+UA = f"{DEVELOPER}/{APP_NAME}/{VERSION} ({GITHUB})"
 
 API_URL = "https://api.bangumi.com"
 
@@ -47,28 +50,26 @@ def guess_vol(filename: str) -> int | None:
         * name - Vol.01...
         * name - Vol01...
         * name - Vol 01...
+        * name - 01...
 
     Args:
         filename: The name of the manga file, don't pass full path.
     """
-    capture = re.search(r"-\s+卷\s*(\d+)", filename)
+    capture = re.search(r"-\s*卷\s*(\d+)", filename)
     if capture is not None:
         return int(capture.group(1))
 
-    capture = re.search(r"-\s+Vol\.(\d+)", filename)
+    capture = re.search(r"-\s*Vol\.(\d+)", filename)
     if capture is not None:
         return int(capture.group(1))
 
-    capture = re.search(r"-\s+Vol\s*(\d+)", filename)
+    capture = re.search(r"-\s*Vol\s*(\d+)", filename)
     if capture is not None:
         return int(capture.group(1))
 
-
-class CalibreAddConfig(TypedDict):
-    prefer_cn_name: bool
-    prefer_meta_tags: bool
-    meta_tag_least_count: int
-    auto_reject_non_manga: bool
+    capture = re.search(r"-\s*(\d+)", filename)
+    if capture is not None:
+        return int(capture.group(1))
 
 
 class BgmSubjectTag(TypedDict):
@@ -190,5 +191,62 @@ def get_bangumi_subject_relation(subject_id: int) -> list[BgmRelationResp]:
         bail(f"Could not decode JSON response. Send issue at {GITHUB}")
 
 
+def lookup_dir(d: str):
+    manga_dir = Path(d)
+    if not manga_dir.exists:
+        bail(f"Path {d} does not exist")
+    if not manga_dir.is_dir():
+        bail(f"Path {d} is not a directory")
+    # TODO
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="A tool to bridge import Bangumi metadata to Calibre",
+        prog=APP_NAME,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command", help="Available commands", required=True
+    )
+    addp = subparsers.add_parser("add", help="Add new manga")
+    addp.add_argument("path", help="Path to the manga directory")
+    addp.add_argument(
+        "--prefer-cn-name",
+        action="store_true",
+        help="Prefer using Chinese translated name as title",
+    )
+
+    try:
+        args = parser.parse_args()
+        return args
+    except argparse.ArgumentError:
+        parser.print_help()
+        exit(0)
+
+
+class CalibreAddConfig(TypedDict):
+    parent: Path
+    file_path: Path
+
+    title: str
+    authors: list[str]
+    isbn: NotRequired[str]
+    tags: list[str]
+    series: str
+    series_index: int
+    cover: NotRequired[str]
+    languages: list[str]
+
+    prefer_cn_name: bool
+    prefer_meta_tags: bool
+    meta_tag_least_count: int
+    auto_reject_non_manga: bool
+
+
+# TODO
 if __name__ == "__main__":
-    pass
+    args = parse_args()
+    if args.command == "add":
+        lookup_dir(args.path)
+    else:
+        bail("internal error: unreachable")
