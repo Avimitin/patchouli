@@ -5,7 +5,7 @@ import re
 import shutil
 import requests
 import argparse
-from typing import NoReturn, TypedDict, cast, NotRequired
+from typing import Callable, NoReturn, TypedDict, cast, NotRequired
 
 
 VERSION = "v0.1.0"
@@ -15,6 +15,21 @@ GITHUB = "https://github.com/Avimitin/patchouli"
 UA = f"{DEVELOPER}/{APP_NAME}/{VERSION} ({GITHUB})"
 
 API_URL = "https://api.bangumi.com"
+
+
+class Task:
+    description: str
+    operation: Callable[[], None]
+
+    def __init__(self, desc: str, op: Callable[[], None]) -> None:
+        self.description = desc
+        self.operation = op
+
+    def __str__(self) -> str:
+        return self.description
+
+    def run(self) -> None:
+        return self.operation()
 
 
 def bail(s: str, code: int = 1) -> NoReturn:
@@ -126,7 +141,18 @@ class BgmSearchResp(TypedDict):
     data: list[BgmSubjectResp]
 
 
-def search_bangumi_subjects(search_payload: dict) -> BgmSearchResp:
+class BgmSearchFilter(TypedDict):
+    type: list[int]
+    nsfw: bool
+
+
+class BgmSearchPayload(TypedDict):
+    keyword: str
+    sort: str
+    filter: BgmSearchFilter
+
+
+def search_bangumi_subjects(search_payload: BgmSearchPayload) -> BgmSearchResp:
     """
     Sends a search request to the Bangumi API with a JSON payload.
 
@@ -191,13 +217,27 @@ def get_bangumi_subject_relation(subject_id: int) -> list[BgmRelationResp]:
         bail(f"Could not decode JSON response. Send issue at {GITHUB}")
 
 
-def lookup_dir(d: str):
+def build_lookup_dir_task(d: str):
     manga_dir = Path(d)
     if not manga_dir.exists:
         bail(f"Path {d} does not exist")
     if not manga_dir.is_dir():
         bail(f"Path {d} is not a directory")
-    # TODO
+
+    # Only read top-level items
+    child_items = list(manga_dir.iterdir())
+    item_count = len(child_items)
+
+    def searcher():
+        # Use dirname to search
+        MANGA_TYPE = 1
+        search_result = search_bangumi_subjects(
+            {
+                "keyword": manga_dir.name,
+                "sort": "rank",
+                "filter": {"type": [MANGA_TYPE], "nsfw": False},
+            }
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -215,6 +255,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Prefer using Chinese translated name as title",
     )
+    # TODO: use a event queue for dry run to print job sequence
+    addp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="TODO: Print job sequence instead of execute it",
+    )
+    addp.add_argument(
+        "--query-only",
+        action="store_true",
+        help="Query metadata and print metadata, but don't acutally add books to Calibre",
+    )
+
+    # prefer_cn_name: bool
+    # prefer_meta_tags: bool
+    # meta_tag_least_count: int
+    # auto_reject_non_manga: bool
 
     try:
         args = parser.parse_args()
@@ -232,21 +288,49 @@ class CalibreAddConfig(TypedDict):
     authors: list[str]
     isbn: NotRequired[str]
     tags: list[str]
-    series: str
-    series_index: int
+    series: NotRequired[str]
+    series_index: NotRequired[int]
     cover: NotRequired[str]
     languages: list[str]
 
-    prefer_cn_name: bool
-    prefer_meta_tags: bool
-    meta_tag_least_count: int
-    auto_reject_non_manga: bool
+
+def config_to_args(cfg: CalibreAddConfig, extra_db_args: list[str]) -> list[str]:
+    args: list[str] = []
+    args += ["-t", cfg["title"]]
+
+    authors = ",".join(cfg["authors"])
+    args += ["-a", authors]
+
+    isbn = cfg.get("isbn")
+    if isbn is not None:
+        args += ["-i", isbn]
+
+    tags = ",".join(cfg["tags"])
+    args += ["-T", tags]
+
+    series = cfg.get("series")
+    if series is not None:
+        args += ["-s", series]
+
+    series_index = cfg.get("series_index")
+    if series_index is not None:
+        args += ["-S", series_index]
+
+    cover_image = cfg.get("cover")
+    if cover_image is not None:
+        args += ["-c", cover_image]
+
+    return args + extra_db_args + [str(cfg["file_path"])]
+
+
+def run_add(args: argparse.Namespace):
+    pass
 
 
 # TODO
 if __name__ == "__main__":
     args = parse_args()
     if args.command == "add":
-        lookup_dir(args.path)
+        run_add(args)
     else:
         bail("internal error: unreachable")
