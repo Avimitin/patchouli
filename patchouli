@@ -444,7 +444,7 @@ def resolve_subject(manga_name_from_dir, author_from_dir, bgm_id):
         {
             "keyword": search_keyword,
             "sort": "match",
-            "filter": {"type": [MANGA_TYPE], "nsfw": False},
+            "filter": {"type": [MANGA_TYPE], "nsfw": True},
         }
     )
     if search_res["data"]:
@@ -632,4 +632,3 @@ if __name__ == "__main__":
         run_add(args)
     else:
         bail("internal error: unreachable")
-
