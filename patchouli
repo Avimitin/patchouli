@@ -5,6 +5,9 @@ import re
 import shutil
 import requests
 import argparse
+import tempfile
+import subprocess
+import os
 from typing import Callable, NoReturn, TypedDict, cast, NotRequired
 
 
@@ -14,7 +17,7 @@ DEVELOPER = "Avimitin"
 GITHUB = "https://github.com/Avimitin/patchouli"
 UA = f"{DEVELOPER}/{APP_NAME}/{VERSION} ({GITHUB})"
 
-API_URL = "https://api.bangumi.com"
+API_URL = "https://api.bgm.tv"
 
 
 class Task:
@@ -86,6 +89,8 @@ def guess_vol(filename: str) -> int | None:
     if capture is not None:
         return int(capture.group(1))
 
+    return None
+
 
 class BgmSubjectTag(TypedDict):
     name: str
@@ -95,6 +100,14 @@ class BgmSubjectTag(TypedDict):
 class BgmSubjectInfobox(TypedDict):
     key: str
     value: str
+
+
+class BgmSubjectImages(TypedDict):
+    large: str
+    common: str
+    medium: str
+    small: str
+    grid: str
 
 
 class BgmSubjectResp(TypedDict):
@@ -107,6 +120,7 @@ class BgmSubjectResp(TypedDict):
     tags: list[BgmSubjectTag]
     meta_tags: list[str]
     infobox: list[BgmSubjectInfobox]
+    images: BgmSubjectImages
 
 
 def get_bangumi_subject(subject_id: int) -> BgmSubjectResp:
@@ -182,7 +196,7 @@ def search_bangumi_subjects(search_payload: BgmSearchPayload) -> BgmSearchResp:
         bail(f"Could not decode JSON response from server. Send issue at {GITHUB}")
 
 
-class BgmRelationResp:
+class BgmRelationResp(TypedDict):
     name: str
     relation: str
     type: int
@@ -215,6 +229,26 @@ def get_bangumi_subject_relation(subject_id: int) -> list[BgmRelationResp]:
         bail(f"An unexpected error occurred: {req_err}")
     except ValueError:
         bail(f"Could not decode JSON response. Send issue at {GITHUB}")
+
+
+def get_volume_map(relations: list[BgmRelationResp]) -> dict[int, int]:
+    """
+    Parse relations to find single booklets (单行本) and map volume number to subject ID.
+    Expected format in name: "Name (Vol)" or similar.
+    """
+    vol_map = {}
+    for rel in relations:
+        if rel["type"] == 1 and rel["relation"] == "单行本":
+            # Extract volume number from "Name (12)" or "Name (1)"
+            # Matches parenthesis with number at the end of string
+            match = re.search(r"\((\d+)\)$", rel["name"])
+            if match:
+                try:
+                    vol_num = int(match.group(1))
+                    vol_map[vol_num] = rel["id"]
+                except ValueError:
+                    pass
+    return vol_map
 
 
 def build_lookup_dir_task(d: str):
@@ -255,6 +289,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Prefer using Chinese translated name as title",
     )
+    addp.add_argument(
+        "--library-path",
+        type=str,
+        help="Path to the calibre library. Can be a remote server address (e.g., http://localhost:8080/#mylibrary)",
+    )
     # TODO: use a event queue for dry run to print job sequence
     addp.add_argument(
         "--dry-run",
@@ -281,7 +320,6 @@ def parse_args() -> argparse.Namespace:
 
 
 class CalibreAddConfig(TypedDict):
-    parent: Path
     file_path: Path
 
     title: str
@@ -298,7 +336,7 @@ def config_to_args(cfg: CalibreAddConfig, extra_db_args: list[str]) -> list[str]
     args: list[str] = []
     args += ["-t", cfg["title"]]
 
-    authors = ",".join(cfg["authors"])
+    authors = "&".join(cfg["authors"])  # Calibre often uses & for multiple authors
     args += ["-a", authors]
 
     isbn = cfg.get("isbn")
@@ -314,18 +352,245 @@ def config_to_args(cfg: CalibreAddConfig, extra_db_args: list[str]) -> list[str]
 
     series_index = cfg.get("series_index")
     if series_index is not None:
-        args += ["-S", series_index]
+        args += ["-S", str(series_index)]
 
     cover_image = cfg.get("cover")
     if cover_image is not None:
         args += ["-c", cover_image]
 
+    languages = ",".join(cfg["languages"])
+    if languages:
+        args += ["-l", languages]
+
     return args + extra_db_args + [str(cfg["file_path"])]
 
 
-def run_add(args: argparse.Namespace):
-    pass
+def parse_dir_name(dir_name: str) -> tuple[str | None, str | None, int | None]:
+    """
+    Parse directory name to extract manga name, optional author, and optional Bangumi ID.
+    Patterns:
+    1. "Name - Author [bgm_ID]"
+    2. "Name - Author"
+    """
+    # Pattern 1: "Name - Author [bgm_ID]"
+    match = re.search(r"^(.*)\s-\s(.*)\s\[bgm_(\d+)\]$", dir_name)
+    if match:
+        return match.group(1).strip(), match.group(2).strip(), int(match.group(3))
 
+    # Pattern 2: "Name - Author"
+    match = re.search(r"^(.*)\s-\s(.*)$", dir_name)
+    if match:
+        # Check if the second part looks like an author, not a bgm_ID.
+        # If it looks like a bgm_ID, then this pattern doesn't apply.
+        potential_author_or_id = match.group(2).strip()
+        if not re.match(r"^(?:\[?bgm_)?\d+\]?$", potential_author_or_id):
+            return match.group(1).strip(), potential_author_or_id, None
+
+    # If no valid pattern matches, return Nones
+    return None, None, None
+
+
+def download_cover(url: str) -> str | None:
+    """Download cover image to a temp file and return its path."""
+    if not url:
+        return None
+    try:
+        response = requests.get(url, stream=True, timeout=20)
+        response.raise_for_status()
+        # Create a temp file
+        # We prefer a suffix based on url, but .jpg is usually safe for bgm
+        suffix = ".jpg"
+        if ".png" in url:
+            suffix = ".png"
+
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "wb") as f:
+            shutil.copyfileobj(response.raw, f)
+        return path
+    except Exception as e:
+        bail(f"Failed to download cover: {e}")
+
+
+def get_author(infobox: list[BgmSubjectInfobox]) -> list[str]:
+    """Extract authors from infobox."""
+    authors = []
+    target_keys = ["作者", "作画", "原作"]
+    for item in infobox:
+        if item["key"] in target_keys:
+            # Value might be "AuthorName" or "Name1, Name2"
+            # It seems Bgm API returns raw string in value, possibly comma separated?
+            # Infobox value is just a string.
+            parts = item["value"].replace("、", ",").split(",")
+            for p in parts:
+                cleaned = p.strip()
+                if cleaned and cleaned not in authors:
+                    authors.append(cleaned)
+    return authors
+
+
+def run_add(args: argparse.Namespace):
+    root_path = Path(args.path)
+    if not root_path.exists() or not root_path.is_dir():
+        bail(f"Directory not found: {root_path}")
+
+    calibre_exec = "calibredb"  # or calibre-debug
+    if not args.dry_run and not args.query_only:
+        cli_check(calibre_exec)
+
+    # Prepare global calibre-db arguments
+    global_calibre_args = []
+    if args.library_path:
+        global_calibre_args.extend(["--library-path", args.library_path])
+
+    for item in root_path.iterdir():
+        if not item.is_dir():
+            continue
+
+        dir_name = item.name
+        # Skip hidden folders
+        if dir_name.startswith("."):
+            continue
+
+        manga_name_from_dir, author_from_dir, bgm_id = parse_dir_name(dir_name)
+
+        if manga_name_from_dir is None:
+            print(
+                f"Skipping '{dir_name}' as it does not match expected naming patterns."
+            )
+            continue
+
+        print(f"Processing: {manga_name_from_dir}")
+
+        subject = None
+
+        if bgm_id:
+            print(f"  Found ID in name: {bgm_id}")
+            subject = get_bangumi_subject(bgm_id)
+        else:
+            search_keyword = manga_name_from_dir
+            if author_from_dir:
+                search_keyword = f"{manga_name_from_dir} {author_from_dir}"  # Combine for better search
+            print(f"  Searching Bangumi for '{search_keyword}'...")
+            MANGA_TYPE = 1  # 1 = book/manga
+            search_res = search_bangumi_subjects(
+                {
+                    "keyword": search_keyword,
+                    "sort": "match",
+                    "filter": {"type": [MANGA_TYPE], "nsfw": False},
+                }
+            )
+            if search_res["data"]:
+                subject = search_res["data"][0]
+                print(f"  Matched: {subject['name']} (ID: {subject['id']})")
+            else:
+                print(f"  No results found for '{search_keyword}', skipping.")
+                continue
+
+        # Fetch relations to find volume specific data
+        print(f"  Fetching relations for '{subject['name']}'...")
+        relations = get_bangumi_subject_relation(subject["id"])
+        volume_map = get_volume_map(relations)
+        if volume_map:
+            print(f"  Found {len(volume_map)} volume entries.")
+
+        # Base metadata (Series level)
+        series_name = subject["name"]
+        if args.prefer_cn_name and subject.get("name_cn"):
+            series_name = subject["name_cn"]
+
+        # Scan files in directory
+        manga_files = sorted(
+            [f for f in item.iterdir() if f.is_file() and not f.name.startswith(".")]
+        )
+
+        for f in manga_files:
+            vol_idx = guess_vol(f.name)
+
+            current_subject = subject  # Default to series subject
+
+            # Check if we have specific volume metadata
+            if vol_idx is not None and vol_idx in volume_map:
+                print(
+                    f"  Fetching specific metadata for Volume {vol_idx} (ID: {volume_map[vol_idx]})..."
+                )
+                current_subject = get_bangumi_subject(volume_map[vol_idx])
+
+            # Prepare metadata
+            title = current_subject["name"]
+            if args.prefer_cn_name and current_subject.get("name_cn"):
+                title = current_subject["name_cn"]
+
+            authors = []
+            if author_from_dir:  # Prioritize author from directory name
+                authors.append(author_from_dir)
+            else:  # Fallback to authors from Bangumi metadata
+                authors.extend(get_author(current_subject.get("infobox", [])))
+
+            if not authors:
+                authors = ["Unknown"]
+
+            tags = [t["name"] for t in current_subject.get("tags", [])]
+
+            cover_url = current_subject.get("images", {}).get("large")
+            cover_path = None
+
+            if not args.query_only:
+                cover_path = download_cover(cover_url)
+
+            if args.query_only:
+                print(f"  [Query Only] Metadata for {f.name}:")
+                print(f"    Title: {title}")
+                print(
+                    f"    Series: {series_name}"
+                )  # Series should keep the main series name
+                print(f"    Authors: {authors}")
+                print(f"    Tags: {tags}")
+                print(f"    Cover: {cover_url}")
+                continue
+
+            # If we can't guess volume, maybe we shouldn't set index?
+            # Or assume it's a one-shot?
+            # For now, if vol_idx is None, we just don't pass series_index
+
+            cfg: CalibreAddConfig = {
+                "file_path": f,
+                "title": title,
+                "authors": authors,
+                "tags": tags,
+                "series": series_name,  # Always use the main series name for grouping
+                "languages": [
+                    "zho"
+                ],  # Defaulting to Chinese/Zho as it's bgm.tv? Or make it configurable?
+            }
+
+            if vol_idx is not None:
+                cfg["series_index"] = vol_idx
+
+            if cover_path:
+                cfg["cover"] = cover_path
+
+            cmd_args = config_to_args(cfg, [])
+            # Add -m new_record to handle duplicates for series
+            full_cmd = (
+                [calibre_exec]
+                + global_calibre_args
+                + ["add", "-m", "new_record"]
+                + cmd_args
+            )
+
+            if args.dry_run:
+                print(f"  [Dry Run] Exec: {' '.join(full_cmd)}")
+            else:
+                print(f"  Adding file: {f.name}")
+                try:
+                    subprocess.run(full_cmd, check=True)
+                except subprocess.CalledProcessError as e:
+                    bail(f"Error adding {f.name}: {e}")
+
+            if cover_path and os.path.exists(cover_path):
+                os.remove(cover_path)
+
+    print("Done.")
 
 # TODO
 if __name__ == "__main__":
