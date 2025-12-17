@@ -428,6 +428,182 @@ def get_author(infobox: list[BgmSubjectInfobox]) -> list[str]:
     return authors
 
 
+def resolve_subject(manga_name_from_dir, author_from_dir, bgm_id):
+    if bgm_id:
+        print(f"  Found ID in name: {bgm_id}")
+        return get_bangumi_subject(bgm_id)
+
+    search_keyword = manga_name_from_dir
+    if author_from_dir:
+        search_keyword = (
+            f"{manga_name_from_dir} {author_from_dir}"  # Combine for better search
+        )
+    print(f"  Searching Bangumi for '{search_keyword}'...")
+    MANGA_TYPE = 1  # 1 = book/manga
+    search_res = search_bangumi_subjects(
+        {
+            "keyword": search_keyword,
+            "sort": "match",
+            "filter": {"type": [MANGA_TYPE], "nsfw": False},
+        }
+    )
+    if search_res["data"]:
+        subject = search_res["data"][0]
+        print(f"  Matched: {subject['name']} (ID: {subject['id']})")
+        return subject
+
+    print(f"  No results found for '{search_keyword}', skipping.")
+    return None
+
+
+def process_manga_file(
+    f: Path,
+    subject: BgmSubjectResp,
+    series_name: str,
+    author_from_dir: str | None,
+    volume_map: dict[int, int],
+    args: argparse.Namespace,
+    calibre_exec: str,
+    global_calibre_args: list[str],
+):
+    vol_idx = guess_vol(f.name)
+
+    current_subject = subject  # Default to series subject
+
+    # Check if we have specific volume metadata
+    if vol_idx is not None and vol_idx in volume_map:
+        print(
+            f"  Fetching specific metadata for Volume {vol_idx} (ID: {volume_map[vol_idx]})..."
+        )
+        current_subject = get_bangumi_subject(volume_map[vol_idx])
+
+    # Prepare metadata
+    title = current_subject["name"]
+    if args.prefer_cn_name and current_subject.get("name_cn"):
+        title = current_subject["name_cn"]
+
+    authors = []
+    if author_from_dir:  # Prioritize author from directory name
+        authors.append(author_from_dir)
+    else:  # Fallback to authors from Bangumi metadata
+        authors.extend(get_author(current_subject.get("infobox", [])))
+
+    if not authors:
+        authors = ["Unknown"]
+
+    tags = [t["name"] for t in current_subject.get("tags", [])]
+
+    cover_url = current_subject.get("images", {}).get("large")
+    cover_path = None
+
+    if not args.query_only:
+        if vol_idx is not None:
+            cover_path = download_cover(cover_url)
+
+    if args.query_only:
+        print(f"  [Query Only] Metadata for {f.name}:")
+        print(f"    Title: {title}")
+        print(f"    Series: {series_name}")  # Series should keep the main series name
+        print(f"    Authors: {authors}")
+        print(f"    Tags: {tags}")
+        print(
+            f"    Cover: {cover_url if vol_idx is not None else 'None (Skipped due to missing volume index)'}"
+        )
+        return
+
+    # If we can't guess volume, maybe we shouldn't set index?
+    # Or assume it's a one-shot?
+    # For now, if vol_idx is None, we just don't pass series_index
+
+    cfg: CalibreAddConfig = {
+        "file_path": f,
+        "title": title,
+        "authors": authors,
+        "tags": tags,
+        "series": series_name,  # Always use the main series name for grouping
+        "languages": [
+            "zho"
+        ],  # Defaulting to Chinese/Zho as it's bgm.tv? Or make it configurable?
+    }
+
+    if vol_idx is not None:
+        cfg["series_index"] = vol_idx
+
+    if cover_path:
+        cfg["cover"] = cover_path
+
+    cmd_args = config_to_args(cfg, [])
+    # Add -m new_record to handle duplicates for series
+    full_cmd = (
+        [calibre_exec] + global_calibre_args + ["add", "-m", "new_record"] + cmd_args
+    )
+
+    if args.dry_run:
+        print(f"  [Dry Run] Exec: {' '.join(full_cmd)}")
+    else:
+        print(f"  Adding file: {f.name}")
+        try:
+            subprocess.run(full_cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            bail(f"Error adding {f.name}: {e}")
+
+    if cover_path and os.path.exists(cover_path):
+        os.remove(cover_path)
+
+
+def process_directory(
+    item: Path,
+    args: argparse.Namespace,
+    calibre_exec: str,
+    global_calibre_args: list[str],
+):
+    dir_name = item.name
+    # Skip hidden folders
+    if dir_name.startswith("."):
+        return
+
+    manga_name_from_dir, author_from_dir, bgm_id = parse_dir_name(dir_name)
+
+    if manga_name_from_dir is None:
+        print(f"Skipping '{dir_name}' as it does not match expected naming patterns.")
+        return
+
+    print(f"Processing: {manga_name_from_dir}")
+
+    subject = resolve_subject(manga_name_from_dir, author_from_dir, bgm_id)
+    if not subject:
+        return
+
+    # Fetch relations to find volume specific data
+    print(f"  Fetching relations for '{subject['name']}'...")
+    relations = get_bangumi_subject_relation(subject["id"])
+    volume_map = get_volume_map(relations)
+    if volume_map:
+        print(f"  Found {len(volume_map)} volume entries.")
+
+    # Base metadata (Series level)
+    series_name = subject["name"]
+    if args.prefer_cn_name and subject.get("name_cn"):
+        series_name = subject["name_cn"]
+
+    # Scan files in directory
+    manga_files = sorted(
+        [f for f in item.iterdir() if f.is_file() and not f.name.startswith(".")]
+    )
+
+    for f in manga_files:
+        process_manga_file(
+            f,
+            subject,
+            series_name,
+            author_from_dir,
+            volume_map,
+            args,
+            calibre_exec,
+            global_calibre_args,
+        )
+
+
 def run_add(args: argparse.Namespace):
     root_path = Path(args.path)
     if not root_path.exists() or not root_path.is_dir():
@@ -445,157 +621,15 @@ def run_add(args: argparse.Namespace):
     for item in root_path.iterdir():
         if not item.is_dir():
             continue
-
-        dir_name = item.name
-        # Skip hidden folders
-        if dir_name.startswith("."):
-            continue
-
-        manga_name_from_dir, author_from_dir, bgm_id = parse_dir_name(dir_name)
-
-        if manga_name_from_dir is None:
-            print(
-                f"Skipping '{dir_name}' as it does not match expected naming patterns."
-            )
-            continue
-
-        print(f"Processing: {manga_name_from_dir}")
-
-        subject = None
-
-        if bgm_id:
-            print(f"  Found ID in name: {bgm_id}")
-            subject = get_bangumi_subject(bgm_id)
-        else:
-            search_keyword = manga_name_from_dir
-            if author_from_dir:
-                search_keyword = f"{manga_name_from_dir} {author_from_dir}"  # Combine for better search
-            print(f"  Searching Bangumi for '{search_keyword}'...")
-            MANGA_TYPE = 1  # 1 = book/manga
-            search_res = search_bangumi_subjects(
-                {
-                    "keyword": search_keyword,
-                    "sort": "match",
-                    "filter": {"type": [MANGA_TYPE], "nsfw": False},
-                }
-            )
-            if search_res["data"]:
-                subject = search_res["data"][0]
-                print(f"  Matched: {subject['name']} (ID: {subject['id']})")
-            else:
-                print(f"  No results found for '{search_keyword}', skipping.")
-                continue
-
-        # Fetch relations to find volume specific data
-        print(f"  Fetching relations for '{subject['name']}'...")
-        relations = get_bangumi_subject_relation(subject["id"])
-        volume_map = get_volume_map(relations)
-        if volume_map:
-            print(f"  Found {len(volume_map)} volume entries.")
-
-        # Base metadata (Series level)
-        series_name = subject["name"]
-        if args.prefer_cn_name and subject.get("name_cn"):
-            series_name = subject["name_cn"]
-
-        # Scan files in directory
-        manga_files = sorted(
-            [f for f in item.iterdir() if f.is_file() and not f.name.startswith(".")]
-        )
-
-        for f in manga_files:
-            vol_idx = guess_vol(f.name)
-
-            current_subject = subject  # Default to series subject
-
-            # Check if we have specific volume metadata
-            if vol_idx is not None and vol_idx in volume_map:
-                print(
-                    f"  Fetching specific metadata for Volume {vol_idx} (ID: {volume_map[vol_idx]})..."
-                )
-                current_subject = get_bangumi_subject(volume_map[vol_idx])
-
-            # Prepare metadata
-            title = current_subject["name"]
-            if args.prefer_cn_name and current_subject.get("name_cn"):
-                title = current_subject["name_cn"]
-
-            authors = []
-            if author_from_dir:  # Prioritize author from directory name
-                authors.append(author_from_dir)
-            else:  # Fallback to authors from Bangumi metadata
-                authors.extend(get_author(current_subject.get("infobox", [])))
-
-            if not authors:
-                authors = ["Unknown"]
-
-            tags = [t["name"] for t in current_subject.get("tags", [])]
-
-            cover_url = current_subject.get("images", {}).get("large")
-            cover_path = None
-
-            if not args.query_only:
-                cover_path = download_cover(cover_url)
-
-            if args.query_only:
-                print(f"  [Query Only] Metadata for {f.name}:")
-                print(f"    Title: {title}")
-                print(
-                    f"    Series: {series_name}"
-                )  # Series should keep the main series name
-                print(f"    Authors: {authors}")
-                print(f"    Tags: {tags}")
-                print(f"    Cover: {cover_url}")
-                continue
-
-            # If we can't guess volume, maybe we shouldn't set index?
-            # Or assume it's a one-shot?
-            # For now, if vol_idx is None, we just don't pass series_index
-
-            cfg: CalibreAddConfig = {
-                "file_path": f,
-                "title": title,
-                "authors": authors,
-                "tags": tags,
-                "series": series_name,  # Always use the main series name for grouping
-                "languages": [
-                    "zho"
-                ],  # Defaulting to Chinese/Zho as it's bgm.tv? Or make it configurable?
-            }
-
-            if vol_idx is not None:
-                cfg["series_index"] = vol_idx
-
-            if cover_path:
-                cfg["cover"] = cover_path
-
-            cmd_args = config_to_args(cfg, [])
-            # Add -m new_record to handle duplicates for series
-            full_cmd = (
-                [calibre_exec]
-                + global_calibre_args
-                + ["add", "-m", "new_record"]
-                + cmd_args
-            )
-
-            if args.dry_run:
-                print(f"  [Dry Run] Exec: {' '.join(full_cmd)}")
-            else:
-                print(f"  Adding file: {f.name}")
-                try:
-                    subprocess.run(full_cmd, check=True)
-                except subprocess.CalledProcessError as e:
-                    bail(f"Error adding {f.name}: {e}")
-
-            if cover_path and os.path.exists(cover_path):
-                os.remove(cover_path)
+        process_directory(item, args, calibre_exec, global_calibre_args)
 
     print("Done.")
 
-# TODO
+
 if __name__ == "__main__":
     args = parse_args()
     if args.command == "add":
         run_add(args)
     else:
         bail("internal error: unreachable")
+

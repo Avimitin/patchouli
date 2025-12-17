@@ -2,15 +2,6 @@
 
 A command-line tool designed to help manga collectors integrate their local manga files with Calibre, leveraging metadata from [Bangumi (bgm.tv)](https://bgm.tv/).
 
-## Features
-
-*   **Manga Directory Scanning:** Scans user-specified directories for manga series.
-*   **Bangumi Metadata Integration:** Extracts comprehensive metadata (titles, authors, tags, cover art) from bgm.tv.
-*   **Volume-Specific Metadata:** Utilizes Bangumi's relation system to fetch and apply metadata unique to individual volumes within a series, such as specific volume titles and cover art, while maintaining proper series grouping in Calibre.
-*   **Calibre Library Management:** Adds manga files to your Calibre library, supporting both local and remote Calibre Content Servers.
-*   **Strict Naming Conventions:** Enforces a clear directory naming standard for accurate metadata matching.
-*   **Robust Error Handling:** Exits early on network request failures or Calibre database operation errors.
-
 ## Prerequisites
 
 *   Python 3.x
@@ -34,6 +25,22 @@ For `patchouli` to accurately identify your manga series and fetch correct metad
     *   Example: `進撃の巨人 - 諫山創`
 
 Any directories not conforming to these patterns will be skipped.
+
+## Volume Filename Handling
+
+`patchouli` attempts to extract the volume number from the filenames within the series directory to correctly assign metadata and covers. The script looks for the following patterns in the filename (where `N` is the volume number):
+
+*   `... - 卷N ...` (e.g., `Fire Punch - 卷01.epub`)
+*   `... - Vol.N ...` (e.g., `Fire Punch - Vol.01.epub`)
+*   `... - VolN ...` (e.g., `Fire Punch - Vol01.epub`)
+*   `... - N ...` (e.g., `Fire Punch - 01.epub`)
+
+If the volume number can be successfully guessed, the script will:
+1.  Fetch specific metadata for that volume if available on Bangumi.
+2.  Set the series index in Calibre to match the volume number.
+3.  Download and set the cover image.
+
+**Important:** If the volume number cannot be determined from the filename, the script will **not** assign a series index and will **not** download a cover image for that file.
 
 ## Usage
 
