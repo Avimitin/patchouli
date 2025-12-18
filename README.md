@@ -17,9 +17,9 @@ A command-line tool designed to help manga collectors integrate their local mang
 
 ## Directory Naming Convention
 
-For `patchouli` to accurately identify your manga series and fetch correct metadata, organize your manga files within directories that follow one of these strict naming conventions:
+For `patchouli` to accurately identify your manga series and fetch correct metadata, your series directories must follow one of these strict naming conventions:
 
-*   **`Manga Name - Author Name [bgm_ID]`**: Provides the most precise match, using the Bangumi ID directly.
+*   **`Manga Name - Author Name [bgm_ID]`**: (Recommended) Provides the most precise match, using the Bangumi ID directly.
     *   Example: `よつばと! - あずまきよひこ [bgm_10086]`
 *   **`Manga Name - Author Name`**: Searches Bangumi using both the manga name and author.
     *   Example: `進撃の巨人 - 諫山創`
@@ -46,15 +46,17 @@ If the volume number can be successfully guessed, the script will:
 
 ### Add Manga to Calibre
 
-The primary command `add` is used to scan a directory containing your manga series folders and add them to Calibre.
+The `add` command adds manga files to your Calibre library. You can process a single series directory or batch process a collection directory.
 
+#### 1. Add a single series
 ```bash
-./patchouli add <path_to_manga_collection> [options]
+./patchouli add <path_to_series_directory> [options]
 ```
 
-**Arguments:**
-
-*   `<path_to_manga_collection>`: The path to the parent directory containing your manga series folders.
+#### 2. Add a collection (Batch mode)
+```bash
+./patchouli add -d <path_to_collection_directory> [options]
+```
 
 **Options:**
 
@@ -67,28 +69,35 @@ The primary command `add` is used to scan a directory containing your manga seri
 
 ### Example Usage
 
-1.  **Adding manga to a local Calibre library:**
+1.  **Adding a single manga series to a local Calibre library:**
 
     ```bash
-    ./patchouli add /home/user/MangaLibrary
+    ./patchouli add "/home/user/MangaLibrary/Yotsuba - Azuma Kiyohiko [bgm_10086]"
     ```
 
-2.  **Adding manga to a remote Calibre Content Server, preferring Chinese titles:**
+2.  **Batch adding a folder of manga series:**
 
     ```bash
-    ./patchouli add /mnt/network/Manga --library-path "http://mycalibreserver.com:8080/#main_manga_library" --prefer-cn-name
+    ./patchouli add -d /home/user/MangaLibrary
+    ```
+    *Assuming `/home/user/MangaLibrary` contains subfolders like `Title - Author`.*
+
+3.  **Adding to a remote Calibre Content Server, preferring Chinese titles:**
+
+    ```bash
+    ./patchouli add -d /mnt/network/Manga --library-path "http://mycalibreserver.com:8080/#main_manga_library" --prefer-cn-name
     ```
 
-3.  **Performing a dry run to see commands without execution:**
+4.  **Performing a dry run to see commands without execution:**
 
     ```bash
-    ./patchouli add /path/to/my/manga --dry-run
+    ./patchouli add -d /path/to/my/manga --dry-run
     ```
 
-4.  **Querying metadata for a collection without adding to Calibre:**
+5.  **Querying metadata for a collection without adding to Calibre:**
 
     ```bash
-    ./patchouli add /tmp/NewMangaDownloads --query-only
+    ./patchouli add -d /tmp/NewMangaDownloads --query-only
     ```
 
 ## Development & Contribution

@@ -8,10 +8,10 @@ import argparse
 import tempfile
 import subprocess
 import os
-from typing import Callable, NoReturn, TypedDict, cast, NotRequired
+import mimetypes
+from typing import NoReturn, TypedDict, cast, NotRequired, Optional
 
-
-VERSION = "v0.1.0"
+VERSION = "v0.1.1"
 APP_NAME = "patchouli"
 DEVELOPER = "Avimitin"
 GITHUB = "https://github.com/Avimitin/patchouli"
@@ -19,20 +19,26 @@ UA = f"{DEVELOPER}/{APP_NAME}/{VERSION} ({GITHUB})"
 
 API_URL = "https://api.bgm.tv"
 
+# Constants
+AUTHOR_KEYS = ["作者", "作画", "原作"]
+RELATION_SINGLE_BOOKLET = "单行本"
 
-class Task:
-    description: str
-    operation: Callable[[], None]
+# Compiled Regexes
+# Matches: - 卷01, - Vol.01, - Vol01, - 01
+# Note: The order in alternation matters if they overlap, but here they are distinct prefixes.
+# We use non-capturing group (?:...) for the prefix.
+# 1. 卷
+# 2. Vol.
+# 3. Vol
+# 4. Empty (just the number)
+VOL_PATTERN = re.compile(r"-\s*(?:卷|Vol\.|Vol)?\s*(\d+)", re.IGNORECASE)
 
-    def __init__(self, desc: str, op: Callable[[], None]) -> None:
-        self.description = desc
-        self.operation = op
-
-    def __str__(self) -> str:
-        return self.description
-
-    def run(self) -> None:
-        return self.operation()
+# Pattern: "Name - Author [bgm_123]"
+DIR_PATTERN_ID = re.compile(r"^(.*)\s-\s(.*)\s\[bgm_(\d+)\]$")
+# Pattern: "Name - Author"
+DIR_PATTERN_BASIC = re.compile(r"^(.*)\s-\s(.*)$")
+# Validation for basic pattern to ensure it's not a malformed ID pattern
+BGM_ID_VALIDATOR = re.compile(r"^(?:\[?bgm_)?\d+\]?$")
 
 
 def bail(s: str, code: int = 1) -> NoReturn:
@@ -47,16 +53,16 @@ def bail(s: str, code: int = 1) -> NoReturn:
     exit(code)
 
 
-def cli_check(exec: str) -> str:
+def cli_check(exec_name: str) -> str:
     """
     Check CLI existence and bail out when not found. Return full path to the CLI.
 
     Args:
-        exec: CLI name to search in system.
+        exec_name: CLI name to search in system.
     """
-    path = shutil.which(exec)
+    path = shutil.which(exec_name)
     if path is None:
-        bail(f"{exec} not found in system")
+        bail(f"{exec_name} not found in system")
     return path
 
 
@@ -73,22 +79,9 @@ def guess_vol(filename: str) -> int | None:
     Args:
         filename: The name of the manga file, don't pass full path.
     """
-    capture = re.search(r"-\s*卷\s*(\d+)", filename)
+    capture = VOL_PATTERN.search(filename)
     if capture is not None:
         return int(capture.group(1))
-
-    capture = re.search(r"-\s*Vol\.(\d+)", filename)
-    if capture is not None:
-        return int(capture.group(1))
-
-    capture = re.search(r"-\s*Vol\s*(\d+)", filename)
-    if capture is not None:
-        return int(capture.group(1))
-
-    capture = re.search(r"-\s*(\d+)", filename)
-    if capture is not None:
-        return int(capture.group(1))
-
     return None
 
 
@@ -138,15 +131,14 @@ def get_bangumi_subject(subject_id: int) -> BgmSubjectResp:
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
 
-        return cast(BgmSubjectResp, response.json())
-    except requests.exceptions.HTTPError as http_err:
-        bail(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.ConnectionError as conn_err:
-        bail(f"Error connecting: {conn_err}")
-    except requests.exceptions.Timeout as timeout_err:
-        bail(f"Request timed out: {timeout_err}")
+        data = response.json()
+        # Basic structure check to ensure we don't crash later
+        if not isinstance(data, dict) or "name" not in data or "id" not in data:
+            bail(f"Invalid API response for subject ID {subject_id}")
+
+        return cast(BgmSubjectResp, data)
     except requests.exceptions.RequestException as req_err:
-        bail(f"An unexpected error occurred: {req_err}")
+        bail(f"Network error occurred: {req_err}")
     except ValueError:
         bail(f"Could not decode JSON response. Send issue at {GITHUB}")
 
@@ -172,7 +164,6 @@ def search_bangumi_subjects(search_payload: BgmSearchPayload) -> BgmSearchResp:
 
     Args:
         search_payload: A dictionary containing the search criteria.
-        user_agent: The custom User-Agent string to send with the request.
     """
     endpoint = "/v0/search/subjects"
     url = API_URL + endpoint
@@ -182,16 +173,13 @@ def search_bangumi_subjects(search_payload: BgmSearchPayload) -> BgmSearchResp:
         response = requests.post(url, headers=headers, json=search_payload, timeout=20)
         response.raise_for_status()
 
-        # Parse the response as JSON
-        return cast(BgmSearchResp, response.json())
-    except requests.exceptions.HTTPError as http_err:
-        bail(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.ConnectionError as conn_err:
-        bail(f"Error connecting: {conn_err}")
-    except requests.exceptions.Timeout as timeout_err:
-        bail(f"Request timed out: {timeout_err}")
+        data = response.json()
+        if not isinstance(data, dict) or "data" not in data:
+            bail("Invalid search API response")
+
+        return cast(BgmSearchResp, data)
     except requests.exceptions.RequestException as req_err:
-        bail(f"An unexpected error occurred: {req_err}")
+        bail(f"Network error occurred: {req_err}")
     except ValueError:
         bail(f"Could not decode JSON response from server. Send issue at {GITHUB}")
 
@@ -218,15 +206,13 @@ def get_bangumi_subject_relation(subject_id: int) -> list[BgmRelationResp]:
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
 
-        return cast(list[BgmRelationResp], response.json())
-    except requests.exceptions.HTTPError as http_err:
-        bail(f"HTTP error occurred: {http_err}")
-    except requests.exceptions.ConnectionError as conn_err:
-        bail(f"Error connecting: {conn_err}")
-    except requests.exceptions.Timeout as timeout_err:
-        bail(f"Request timed out: {timeout_err}")
+        data = response.json()
+        if not isinstance(data, list):
+            bail(f"Invalid relation API response for subject ID {subject_id}")
+
+        return cast(list[BgmRelationResp], data)
     except requests.exceptions.RequestException as req_err:
-        bail(f"An unexpected error occurred: {req_err}")
+        bail(f"Network error occurred: {req_err}")
     except ValueError:
         bail(f"Could not decode JSON response. Send issue at {GITHUB}")
 
@@ -238,7 +224,7 @@ def get_volume_map(relations: list[BgmRelationResp]) -> dict[int, int]:
     """
     vol_map = {}
     for rel in relations:
-        if rel["type"] == 1 and rel["relation"] == "单行本":
+        if rel["type"] == 1 and rel["relation"] == RELATION_SINGLE_BOOKLET:
             # Extract volume number from "Name (12)" or "Name (1)"
             # Matches parenthesis with number at the end of string
             match = re.search(r"\((\d+)\)$", rel["name"])
@@ -251,29 +237,6 @@ def get_volume_map(relations: list[BgmRelationResp]) -> dict[int, int]:
     return vol_map
 
 
-def build_lookup_dir_task(d: str):
-    manga_dir = Path(d)
-    if not manga_dir.exists:
-        bail(f"Path {d} does not exist")
-    if not manga_dir.is_dir():
-        bail(f"Path {d} is not a directory")
-
-    # Only read top-level items
-    child_items = list(manga_dir.iterdir())
-    item_count = len(child_items)
-
-    def searcher():
-        # Use dirname to search
-        MANGA_TYPE = 1
-        search_result = search_bangumi_subjects(
-            {
-                "keyword": manga_dir.name,
-                "sort": "rank",
-                "filter": {"type": [MANGA_TYPE], "nsfw": False},
-            }
-        )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="A tool to bridge import Bangumi metadata to Calibre",
@@ -283,7 +246,14 @@ def parse_args() -> argparse.Namespace:
         dest="command", help="Available commands", required=True
     )
     addp = subparsers.add_parser("add", help="Add new manga")
-    addp.add_argument("path", help="Path to the manga directory")
+    addp.add_argument(
+        "path", nargs="?", help="Path to the manga series directory"
+    )
+    addp.add_argument(
+        "-d",
+        "--directory",
+        help="Path to the directory containing multiple manga series",
+    )
     addp.add_argument(
         "--prefer-cn-name",
         action="store_true",
@@ -294,22 +264,16 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Path to the calibre library. Can be a remote server address (e.g., http://localhost:8080/#mylibrary)",
     )
-    # TODO: use a event queue for dry run to print job sequence
     addp.add_argument(
         "--dry-run",
         action="store_true",
-        help="TODO: Print job sequence instead of execute it",
+        help="Print job sequence instead of execute it",
     )
     addp.add_argument(
         "--query-only",
         action="store_true",
         help="Query metadata and print metadata, but don't acutally add books to Calibre",
     )
-
-    # prefer_cn_name: bool
-    # prefer_meta_tags: bool
-    # meta_tag_least_count: int
-    # auto_reject_non_manga: bool
 
     try:
         args = parser.parse_args()
@@ -365,7 +329,7 @@ def config_to_args(cfg: CalibreAddConfig, extra_db_args: list[str]) -> list[str]
     return args + extra_db_args + [str(cfg["file_path"])]
 
 
-def parse_dir_name(dir_name: str) -> tuple[str | None, str | None, int | None]:
+def parse_dir_name(dir_name: str) -> Optional[tuple[str, str, int | None]]:
     """
     Parse directory name to extract manga name, optional author, and optional Bangumi ID.
     Patterns:
@@ -373,21 +337,21 @@ def parse_dir_name(dir_name: str) -> tuple[str | None, str | None, int | None]:
     2. "Name - Author"
     """
     # Pattern 1: "Name - Author [bgm_ID]"
-    match = re.search(r"^(.*)\s-\s(.*)\s\[bgm_(\d+)\]$", dir_name)
+    match = DIR_PATTERN_ID.search(dir_name)
     if match:
         return match.group(1).strip(), match.group(2).strip(), int(match.group(3))
 
     # Pattern 2: "Name - Author"
-    match = re.search(r"^(.*)\s-\s(.*)$", dir_name)
+    match = DIR_PATTERN_BASIC.search(dir_name)
     if match:
         # Check if the second part looks like an author, not a bgm_ID.
         # If it looks like a bgm_ID, then this pattern doesn't apply.
         potential_author_or_id = match.group(2).strip()
-        if not re.match(r"^(?:\[?bgm_)?\d+\]?$", potential_author_or_id):
+        if not BGM_ID_VALIDATOR.match(potential_author_or_id):
             return match.group(1).strip(), potential_author_or_id, None
 
-    # If no valid pattern matches, return Nones
-    return None, None, None
+    # If no valid pattern matches, return None
+    return None
 
 
 def download_cover(url: str) -> str | None:
@@ -397,13 +361,18 @@ def download_cover(url: str) -> str | None:
     try:
         response = requests.get(url, stream=True, timeout=20)
         response.raise_for_status()
-        # Create a temp file
-        # We prefer a suffix based on url, but .jpg is usually safe for bgm
-        suffix = ".jpg"
-        if ".png" in url:
-            suffix = ".png"
 
-        fd, path = tempfile.mkstemp(suffix=suffix)
+        content_type = response.headers.get("content-type")
+        if not content_type:
+            # Fallback based on URL or default
+            if ".png" in url:
+                extension = ".png"
+            else:
+                extension = ".jpg"
+        else:
+            extension = mimetypes.guess_extension(content_type)
+
+        fd, path = tempfile.mkstemp(suffix=extension)
         with os.fdopen(fd, "wb") as f:
             shutil.copyfileobj(response.raw, f)
         return path
@@ -414,12 +383,9 @@ def download_cover(url: str) -> str | None:
 def get_author(infobox: list[BgmSubjectInfobox]) -> list[str]:
     """Extract authors from infobox."""
     authors = []
-    target_keys = ["作者", "作画", "原作"]
     for item in infobox:
-        if item["key"] in target_keys:
+        if item["key"] in AUTHOR_KEYS:
             # Value might be "AuthorName" or "Name1, Name2"
-            # It seems Bgm API returns raw string in value, possibly comma separated?
-            # Infobox value is just a string.
             parts = item["value"].replace("、", ",").split(",")
             for p in parts:
                 cleaned = p.strip()
@@ -428,7 +394,9 @@ def get_author(infobox: list[BgmSubjectInfobox]) -> list[str]:
     return authors
 
 
-def resolve_subject(manga_name_from_dir, author_from_dir, bgm_id):
+def resolve_subject(
+    manga_name_from_dir: str, author_from_dir: str | None, bgm_id: int | None
+) -> Optional[BgmSubjectResp]:
     if bgm_id:
         print(f"  Found ID in name: {bgm_id}")
         return get_bangumi_subject(bgm_id)
@@ -511,19 +479,13 @@ def process_manga_file(
         )
         return
 
-    # If we can't guess volume, maybe we shouldn't set index?
-    # Or assume it's a one-shot?
-    # For now, if vol_idx is None, we just don't pass series_index
-
     cfg: CalibreAddConfig = {
         "file_path": f,
         "title": title,
         "authors": authors,
         "tags": tags,
         "series": series_name,  # Always use the main series name for grouping
-        "languages": [
-            "zho"
-        ],  # Defaulting to Chinese/Zho as it's bgm.tv? Or make it configurable?
+        "languages": ["zho"],
     }
 
     if vol_idx is not None:
@@ -562,11 +524,13 @@ def process_directory(
     if dir_name.startswith("."):
         return
 
-    manga_name_from_dir, author_from_dir, bgm_id = parse_dir_name(dir_name)
+    parsed = parse_dir_name(dir_name)
 
-    if manga_name_from_dir is None:
+    if parsed is None:
         print(f"Skipping '{dir_name}' as it does not match expected naming patterns.")
         return
+
+    manga_name_from_dir, author_from_dir, bgm_id = parsed
 
     print(f"Processing: {manga_name_from_dir}")
 
@@ -605,11 +569,7 @@ def process_directory(
 
 
 def run_add(args: argparse.Namespace):
-    root_path = Path(args.path)
-    if not root_path.exists() or not root_path.is_dir():
-        bail(f"Directory not found: {root_path}")
-
-    calibre_exec = "calibredb"  # or calibre-debug
+    calibre_exec = "calibredb"
     if not args.dry_run and not args.query_only:
         cli_check(calibre_exec)
 
@@ -618,10 +578,26 @@ def run_add(args: argparse.Namespace):
     if args.library_path:
         global_calibre_args.extend(["--library-path", args.library_path])
 
-    for item in root_path.iterdir():
-        if not item.is_dir():
-            continue
-        process_directory(item, args, calibre_exec, global_calibre_args)
+    if args.path:
+        # Process single series
+        series_path = Path(args.path).resolve()
+        if not series_path.exists() or not series_path.is_dir():
+            bail(f"Directory not found: {series_path}")
+        process_directory(series_path, args, calibre_exec, global_calibre_args)
+    elif args.directory:
+        # Process collection
+        root_path = Path(args.directory).resolve()
+        if not root_path.exists() or not root_path.is_dir():
+            bail(f"Directory not found: {root_path}")
+
+        for item in root_path.iterdir():
+            if not item.is_dir():
+                continue
+            process_directory(item, args, calibre_exec, global_calibre_args)
+    else:
+        bail(
+            "Please provide a series path or use -d to specify a collection directory."
+        )
 
     print("Done.")
 
