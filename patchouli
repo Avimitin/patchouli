@@ -246,9 +246,7 @@ def parse_args() -> argparse.Namespace:
         dest="command", help="Available commands", required=True
     )
     addp = subparsers.add_parser("add", help="Add new manga")
-    addp.add_argument(
-        "path", nargs="?", help="Path to the manga series directory"
-    )
+    addp.add_argument("path", nargs="?", help="Path to the manga series directory")
     addp.add_argument(
         "-d",
         "--directory",
@@ -263,6 +261,12 @@ def parse_args() -> argparse.Namespace:
         "--library-path",
         type=str,
         help="Path to the calibre library. Can be a remote server address (e.g., http://localhost:8080/#mylibrary)",
+    )
+    addp.add_argument(
+        "-l",
+        "--language",
+        required=True,
+        help="Language code for the manga (e.g., zho, jpn, eng)",
     )
     addp.add_argument(
         "--dry-run",
@@ -474,6 +478,7 @@ def process_manga_file(
         print(f"    Series: {series_name}")  # Series should keep the main series name
         print(f"    Authors: {authors}")
         print(f"    Tags: {tags}")
+        print(f"    Date: {current_subject.get('date')}")
         print(
             f"    Cover: {cover_url if vol_idx is not None else 'None (Skipped due to missing volume index)'}"
         )
@@ -485,7 +490,7 @@ def process_manga_file(
         "authors": authors,
         "tags": tags,
         "series": series_name,  # Always use the main series name for grouping
-        "languages": ["zho"],
+        "languages": [args.language],
     }
 
     if vol_idx is not None:
@@ -500,14 +505,38 @@ def process_manga_file(
         [calibre_exec] + global_calibre_args + ["add", "-m", "new_record"] + cmd_args
     )
 
+    pub_date = current_subject.get("date")
+
     if args.dry_run:
         print(f"  [Dry Run] Exec: {' '.join(full_cmd)}")
+        if pub_date:
+            print(
+                f"  [Dry Run] Exec: {calibre_exec} {' '.join(global_calibre_args)} set_metadata <ID> --field pubdate:{pub_date}"
+            )
     else:
         print(f"  Adding file: {f.name}")
         try:
-            subprocess.run(full_cmd, check=True)
+            # Capture output to extract the new book ID
+            result = subprocess.run(
+                full_cmd, check=True, capture_output=True, text=True
+            )
+            print(result.stdout, end="")  # Pass through stdout
+
+            # Parse the new book ID
+            # Output format: "Added book ids: 123"
+            match = re.search(r"Added book ids:\s*(\d+)", result.stdout)
+            if match and pub_date:
+                book_id = match.group(1)
+                print(f"  Setting pubdate to {pub_date} for book ID {book_id}...")
+                set_meta_cmd = (
+                    [calibre_exec]
+                    + global_calibre_args
+                    + ["set_metadata", str(book_id), "--field", f"pubdate:{pub_date}"]
+                )
+                subprocess.run(set_meta_cmd, check=True)
+
         except subprocess.CalledProcessError as e:
-            bail(f"Error adding {f.name}: {e}")
+            bail(f"Error adding {f.name}: {e}\nStdout: {e.stdout}\nStderr: {e.stderr}")
 
     if cover_path and os.path.exists(cover_path):
         os.remove(cover_path)
